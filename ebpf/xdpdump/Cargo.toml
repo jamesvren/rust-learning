@@ -1,0 +1,16 @@
+[package]
+name = "xdpdump"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage"] }
+anyhow = "1.0"
+libbpf-rs = "0.21"
+libc = "0.2"
+plain = "0.2"
+
+[build-dependencies]
+libbpf-cargo = "0.21"
