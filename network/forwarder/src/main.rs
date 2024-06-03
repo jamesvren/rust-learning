@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Output;
 use std::process::Stdio;
+use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
@@ -21,6 +22,7 @@ use forwarder::log as logging;
 #[derive(Deserialize)]
 struct Request {
     bash: String,
+    owner: String,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -104,7 +106,7 @@ struct Cli {
     port: u16,
 }
 
-const SOCK: &str = "/var/run/forwarder.sock";
+const SOCK: &str = "/var/run/forwarder/forwarder.sock";
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = Cli::parse();
@@ -116,10 +118,18 @@ async fn main() -> Result<()> {
     let path = Path::new(SOCK);
     if path.exists() {
         fs::remove_file(SOCK)?;
+    } else {
+        let dir = path.parent().unwrap();
+        if !dir.try_exists()? {
+            fs::create_dir_all(dir)?;
+        }
     }
     let mut handlers: Vec<JoinHandle<Result<()>>> = Vec::new();
 
     let unix_listener = UnixListener::bind(SOCK)?;
+    let mut perms = fs::metadata(SOCK)?.permissions();
+    perms.set_mode(0o666);
+    fs::set_permissions(SOCK, perms)?;
     handlers.push(tokio::spawn(async move {
         loop {
             let (stream, addr) = unix_listener.accept().await?;

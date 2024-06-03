@@ -40,10 +40,10 @@ pub fn init(dir: &str, size: u64, max: u32) -> Result<()> {
     Ok(())
 }
 
-fn ensure_log_dir(file: &str) -> Result<String> {
-    let path = Path::new(file);
+fn ensure_log_dir(dir: &str) -> Result<String> {
+    let path = Path::new(dir);
     if !path.try_exists()? {
-        fs::create_dir_all(file)?;
+        fs::create_dir_all(dir)?;
     }
     Ok(format!("{}forwarder.{{}}.gz", path.to_str().unwrap()))
 }
