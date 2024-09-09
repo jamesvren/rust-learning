@@ -9,6 +9,8 @@ use pnet::datalink::NetworkInterface;
 use pnet::datalink::DataLinkSender;
 use pnet::datalink::DataLinkReceiver;
 use rustix::system::uname;
+use rustix::net::{socket, AddressFamily, SocketType, eth};
+use rustix::fd::IntoRawFd;
 use clap::Parser;
 use log::{info, debug};
 
@@ -244,10 +246,12 @@ async fn main() {
         }
         info!("nic: {interface:?}");
 
+        let sock = socket(AddressFamily::PACKET, SocketType::RAW, Some(eth::AARP)).unwrap();
         let config = datalink::Config {
             //write_buffer_size: 256,
             //read_buffer_size: 256,
             //promiscuous: false,
+            socket_fd: Some(sock.into_raw_fd()),
             ..Default::default()
         };
         let (eth_tx, eth_rx) = match datalink::channel(&interface, config) {
