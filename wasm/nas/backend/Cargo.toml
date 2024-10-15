@@ -9,10 +9,12 @@ edition = "2021"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
-mobc-postgres = { version = "0.8", features = ["with-chrono-0_4"] }
-mobc = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
-#axum = "0.7"
-warp = "0.3"
+axum = "0.7"
 thiserror = "1"
 common = { version = "0.1.0", path = "../common"}
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+tower = "0.4.13"
+tower-http = { version = "0.5.2", features = ["full"] }
+log = "0.4.21"

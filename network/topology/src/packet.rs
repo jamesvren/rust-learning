@@ -1,5 +1,5 @@
 use pnet::datalink::MacAddr;
-use pnet::datalink::NetworkInterface;
+//use pnet::datalink::NetworkInterface;
 use pnet::packet::ethernet::MutableEthernetPacket;
 use pnet::packet::ethernet::EthernetPacket;
 use pnet::packet::ethernet::EtherTypes;
@@ -13,16 +13,18 @@ use pnet::packet::arp::ArpHardwareTypes;
 use pnet::packet::PacketSize;
 use pnet::packet::MutablePacket;
 
+use crate::Interface;
+
 
 pub fn builder(
         buf: &mut [u8],
-        interface: &NetworkInterface,
+        interface: &Interface,
         dst_mac: MacAddr,
         vlan: u16,
         hostname: &str
     ) -> usize {
    let mut eth = MutableEthernetPacket::new(buf).unwrap();
-   let src_mac = interface.mac.unwrap();
+   let src_mac: [u8; 6] = (&interface.mac).into();
 
    // encap ethernet header
    eth.set_destination(dst_mac);
@@ -35,10 +37,12 @@ pub fn builder(
        eth.set_ethertype(EtherTypes::Vlan);
        let mut packet = MutableVlanPacket::new(eth.payload_mut()).unwrap();
        packet.set_vlan_identifier(vlan);
-       packet.set_ethertype(EtherTypes::Rarp);
+       //packet.set_ethertype(EtherTypes::Rarp);
+       packet.set_ethertype(EtherTypes::Aarp);
        len += packet.packet_size();
    } else {
-       eth.set_ethertype(EtherTypes::Rarp);
+       //eth.set_ethertype(EtherTypes::Rarp);
+       eth.set_ethertype(EtherTypes::Aarp);
    }
 
    // encap self information to RARP packet
@@ -86,7 +90,7 @@ pub fn builder(
    len
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Peer {
     pub host: String,
     pub nic: String,
@@ -107,7 +111,8 @@ pub fn parse(buf: &[u8]) -> Option<(Peer, bool)> {
         (0, packet.get_ethertype())
     };
 
-    if ether_type == EtherTypes::Rarp {
+    //if ether_type == EtherTypes::Rarp {
+    if ether_type == EtherTypes::Aarp {
         let rarp = ArpPacket::new(&buf[offset..]).unwrap();
         //let request = if rarp.get_operation() == ArpOperations::Request {
         let request = if rarp.get_operation() == ArpOperation(3) {
