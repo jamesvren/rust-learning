@@ -1,21 +1,15 @@
 use libc::{uname, utsname};
-use libc::c_void;
-use libc::bind;
-use libc::sendto;
-use libc::socket;
-use libc::sockaddr;
-use libc::sockaddr_ll;
-use libc::socklen_t;
-use libc::recvfrom;
-use libc::AF_PACKET;
-use libc::SOCK_RAW;
 use std::fs;
 use std::io;
 use std::fmt;
 use std::mem;
+use std::os::fd::OwnedFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::AsRawFd;
 use std::str::FromStr;
 use std::collections::HashMap;
-use log::{debug};
+use log::{debug, error};
+use tokio::io::unix::AsyncFd;
 
 pub mod packet;
 
@@ -199,84 +193,158 @@ pub fn get_physical_nics() -> Vec<Interface> {
     nics
 }
 
-pub fn open_socket(proto: u16, block: bool) -> io::Result<i32> {
-    match unsafe { socket(AF_PACKET, SOCK_RAW, proto.to_be().into()) } {
-        -1 => Err(io::Error::last_os_error()),
-        fd => {
-            unsafe {
-                let flag = libc::fcntl(fd, libc::F_GETFL, 0);
-                if !block {
+pub struct Socket {
+    fd: AsyncFd<OwnedFd>,
+    proto: u16,
+}
+
+impl Socket {
+    pub fn new(proto: u16) -> io::Result<Self> {
+        match unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, proto.to_be().into()) } {
+            -1 => Err(io::Error::last_os_error()),
+            fd => {
+                unsafe {
+                    let flag = libc::fcntl(fd, libc::F_GETFL, 0);
                     libc::fcntl(fd, libc::F_SETFL, flag | libc::O_NONBLOCK);
                 }
+                Ok(Socket {
+                    fd: AsyncFd::new(unsafe { OwnedFd::from_raw_fd(fd) })?,
+                    proto,
+                })
+            },
+        }
+    }
+
+    pub fn bind(&self, ifindex: u32) -> io::Result<()> {
+        let sa = libc::sockaddr_ll {
+            sll_family: libc::AF_PACKET as libc::sa_family_t,
+            sll_protocol: self.proto.to_be(),
+            sll_ifindex: ifindex as i32,
+            sll_hatype: 0,
+            sll_pkttype: 0,
+            sll_halen: 0,
+            sll_addr: [0; 8]
+        };
+        let addr_ptr = &raw const sa as *const libc::sockaddr;
+        unsafe {
+            let addr_len: libc::socklen_t = mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+            match libc::bind(self.fd.get_ref().as_raw_fd(), addr_ptr, addr_len) {
+                -1 => {
+                    let err = io::Error::last_os_error();
+                    error!("bind failed: {}, kind: {:?}", err, err.kind());
+                    Err(err)
+                },
+                _ => Ok(()),
             }
-            Ok(fd)
+        }
+    }
+
+    pub fn set_promiscuous(&self, promisc: bool, ifindex: u32) -> io::Result<()> {
+        let req = libc::packet_mreq {
+            mr_ifindex: ifindex as i32,
+            mr_type: libc::PACKET_MR_PROMISC as u16,
+            mr_alen: 0,
+            mr_address: [0u8; 8],
+        };
+
+        if unsafe {
+            libc::setsockopt(
+                self.fd.get_ref().as_raw_fd(),
+                libc::SOL_PACKET,
+                if promisc {
+                    libc::PACKET_ADD_MEMBERSHIP
+                } else {
+                    libc::PACKET_DROP_MEMBERSHIP
+                },
+                &raw const req as *const libc::c_void,
+                mem::size_of::<libc::packet_mreq>() as libc::socklen_t,
+            ) != 0
+        } {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(())
+    }
+
+    pub async fn recv(&mut self, buf: &mut [u8]) -> io::Result<u32> {
+        loop {
+            let mut guard = self.fd.readable().await?;
+            match guard.try_io(|inner| recv(inner.get_ref().as_raw_fd(), buf)) {
+                Ok(ifindex) => return ifindex,
+                Err(_would_block) => {
+                    continue
+                },
+            }
+        }
+    }
+
+    pub async fn send(&mut self, buf: &[u8], ifindex: u32) -> io::Result<isize> {
+        let sa = libc::sockaddr_ll {
+            sll_family: libc::AF_PACKET as libc::sa_family_t,
+            sll_protocol: self.proto.to_be(),
+            sll_ifindex: ifindex as i32,
+            sll_hatype: 0,
+            sll_pkttype: 0,
+            sll_halen: 0,
+            sll_addr: [0; 8]
+        };
+        loop {
+            let mut guard = self.fd.writable().await?;
+            match guard.try_io(|inner| send(inner.get_ref().as_raw_fd(), buf, &sa)) {
+                Ok(result) => return result,
+                Err(_would_block) => continue,
+            }
         }
     }
 }
 
-pub async fn recv(fd: i32, buf: &mut [u8]) -> u32 {                                                                                                                         
-    let mut sender_addr: sockaddr_ll = unsafe { mem::zeroed() };
- 
-    //let mut addr: libc::sockaddr_storage = unsafe { mem::zeroed() };
-    //let sender_addr = (&addr as *const libc::sockaddr_storage) as *const libc::sockaddr;
-
-    let mut addr_buf_sz: socklen_t = mem::size_of::<sockaddr_ll>() as socklen_t;
+fn recv(fd: i32, buf: &mut [u8]) -> io::Result<u32> {                                                                                                                         
+    let mut sa: libc::sockaddr_ll = unsafe { mem::zeroed() };
+    let mut addr_len = mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
     debug!("recv from socket {fd}");
     unsafe {
-        let addr_ptr = mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sender_addr);
-        match recvfrom(fd,
-                       buf.as_mut_ptr() as *mut c_void,
+        match libc::recvfrom(fd,
+                       buf.as_mut_ptr() as *mut libc::c_void,
                        buf.len(),
                        0,   // flags
-                       addr_ptr,
-                       &mut addr_buf_sz) {
+                       &raw mut sa as *mut libc::sockaddr,
+                       &mut addr_len) {
+                       //std::ptr::null_mut(),
+                       //std::ptr::null_mut()) {
             -1 => {
                 let err = io::Error::last_os_error(); // io::ErrorKind::WouldBlock
-                eprintln!("failed: {}, kind: {:?}", err, err.kind());
-                0
+                //error!("recv failed: {}, kind: {:?}", err, err.kind());
+                Err(err)
             },
             len => {
-                let iface_index = sender_addr.sll_ifindex;
+                let iface_index = sa.sll_ifindex as u32;
                 debug!("fd({fd}) len: {len}, from nic: {iface_index}");
-                iface_index as u32
+                Ok(iface_index)
             }
         }
     }
 }
 
-pub async fn send(fd: i32, buf: &[u8], ifindex: u32) {
-    let proto = libc::ETH_P_ALL as u16;
-    let mut sa = sockaddr_ll {
-        sll_family: AF_PACKET as u16,
-        sll_protocol: proto.to_be(),
-        sll_ifindex: ifindex as i32,
-        sll_hatype: 0,
-        sll_pkttype: 0,
-        sll_halen: 0,
-        sll_addr: [0; 8]
-    };
- 
-    let addr_buf_sz: socklen_t = mem::size_of_val(&sa) as socklen_t;
-    debug!("send to socket {fd} | {buf:0x?}");
+fn send(fd: i32, buf: &[u8], sa: *const libc::sockaddr_ll) -> io::Result<isize> {
+    let addr_ptr = sa as *const libc::sockaddr;
+    let addr_len: libc::socklen_t = mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+    debug!("send to socket {fd} | {buf:02x?}");
     unsafe {
-        let addr_ptr = mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sa);
-        let res = bind(fd, addr_ptr, addr_buf_sz);
-        if res == -1 {
-            let err = io::Error::last_os_error();
-            eprintln!("bind failed: {}, kind: {:?}", err, err.kind());
-        }
-        match sendto(fd,
-                     buf.as_ptr() as *const c_void,
+        debug!("send to ifindex {}, proto {:0x}, family {:0x}", (*sa).sll_ifindex, (*sa).sll_protocol, (*sa).sll_family);
+        match libc::sendto(fd,
+                     buf.as_ptr() as *const libc::c_void,
                      buf.len(),
                      0,   // flags
                      addr_ptr,
-                     addr_buf_sz) {
+                     addr_len) {
             len if len < 0 => {
                 let err = io::Error::last_os_error(); // io::ErrorKind::WouldBlock
-                eprintln!("send failed: {}, kind: {:?}", err, err.kind());
+                error!("send failed: {}, kind: {:?}", err, err.kind());
+                Err(err)
             },
             len => {
-                debug!("send fd({fd}) len: {len}, from nic: {ifindex}");
+                debug!("send fd({fd}) len: {len}, from nic: {}", (*sa).sll_ifindex);
+                Ok(len)
             }
         }
     }

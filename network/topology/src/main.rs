@@ -1,39 +1,21 @@
-//use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use pnet::datalink;
-//use pnet::datalink::MacAddr;
-//use pnet::datalink::Channel::Ethernet;
-//use pnet::datalink::NetworkInterface;
-//use pnet::datalink::DataLinkSender;
-//use pnet::datalink::DataLinkReceiver;
-//use pnet::packet::ethernet::EtherTypes;
-//use rustix::system::uname;
-//use rustix::net::{socket, AddressFamily, SocketType, eth};
-//use rustix::fd::IntoRawFd;
 use clap::Parser;
-use log::{warn, info, debug};
+use log::{info, debug};
 
-//use topology::MacAddress;
 use topology::packet;
 use topology::packet::Peer;
 use topology::hostname;
 use topology::get_physical_nics;
-use topology::open_socket;
-use topology::recv;
 use topology::Interface;
-use topology::send;
 use topology::OperState;
 use topology::Topo;
 use topology::Node;
+use topology::Socket;
 
 use std::collections::HashMap;
-//use std::sync::{LazyLock, Mutex};
 
-// key = (host, my_nic, my_mac, peer, peer_nic, peer_mac)
-// value = vlans
-//type Topo = BTreeMap<(String, String, MacAddress, String, String, MacAddress), Vec<u16>>;
-//static TOPO: LazyLock<Mutex<Topo>> = LazyLock::new(Default::default);
 
 #[derive(Parser, Debug)]
 struct Opt {
@@ -61,141 +43,6 @@ fn vlan_range(s: &str) -> Result<(u16, u16), String> {
     }
 }
 
-
-//async fn detect_connection(host: String, interface: NetworkInterface, vlan_range: Vec<(u16, u16)>) {
-//    //let sock = socket(AddressFamily::PACKET, SocketType::RAW, Some(eth::RARP)).unwrap();
-//    let config = datalink::Config {
-//        channel_type: datalink::ChannelType::Layer2(0x80F3),
-//        //promiscuous: false,
-//        //socket_fd: Some(sock.into_raw_fd()),
-//        ..Default::default()
-//    };
-//    let (mut eth_tx, mut eth_rx) = match datalink::channel(&interface, config) {
-//        Ok(Ethernet(tx, rx)) => (tx, rx),
-//        _ => panic!("Failed to create network channel"),
-//    };
-//
-//    let mac = datalink::MacAddr::broadcast();
-//    for (start, end) in vlan_range {
-//        for vlan in start..=end {
-//            let mut buf = [0u8; 1500];
-//            let len = packet::builder(&mut buf, &interface, mac, vlan, &host);
-//            let result = eth_tx.send_to(&buf[0..len], Some(interface.clone()));
-//            debug!("Send out from {} with VLAN {vlan} MAC({mac}), result {result:?}", interface.name);
-//
-//            //match eth_rx.next() {
-//            //    Ok(packet) => {
-//            //        debug!("Receive {packet:0x?}");
-//            //        if let Some((peer, request)) = packet::parse(packet) {
-//            //            debug!("Receive {} at {} from {peer:?}", if request {"REQUEST"} else {"REPLY"}, interface.name);
-//            //            if request {
-//            //                // always reply with untag
-//            //                //let vlans = vec![(0,0), (peer.vlan, peer.vlan)];
-//            //                let mut buf = [0u8; 1500];
-//            //                let vlan = peer.vlan;
-//            //                let mac = peer.mac;
-//            //                let len = packet::builder(&mut buf, &interface, mac, vlan, &host);
-//            //                let result = eth_tx.send_to(&buf[0..len], Some(interface.clone()));
-//            //                debug!("Send out from {} with VLAN {vlan} MAC({mac}), result {result:?}", interface.name);
-//            //            }
-//            //            TOPO.lock()
-//            //                .unwrap()
-//            //                .entry((host.clone(), interface.name.clone(), interface.mac.unwrap(), peer.host.clone(), peer.nic.clone(), peer.mac))
-//            //                .and_modify(|p| { p.push(peer.vlan); p.sort(); p.dedup(); })
-//            //                .or_insert(vec![peer.vlan]);
-//            //        }
-//            //    },
-//            //    Err(_) => println!("No packet at all"),
-//            //}
-//        }
-//    }
-//
-//    loop {
-//        match eth_rx.next() {
-//            Ok(packet) => {
-//                debug!("Receive {packet:0x?}");
-//                if let Some((peer, request)) = packet::parse(packet) {
-//                    debug!("{}: Receive {} from {peer:?}", interface.name, if request {"REQUEST"} else {"REPLY"});
-//                    if request {
-//                        // always reply with untag
-//                        //let vlans = vec![(0,0), (peer.vlan, peer.vlan)];
-//                        let mut buf = [0u8; 1500];
-//                        let vlan = peer.vlan;
-//                        let mac = peer.mac;
-//                        let len = packet::builder(&mut buf, &interface, mac, vlan, &host);
-//                        let result = eth_tx.send_to(&buf[0..len], Some(interface.clone()));
-//                        debug!("{}: Reply with VLAN {vlan} MAC({mac}), result {result:?}", interface.name);
-//                    }
-//                    TOPO.lock()
-//                        .unwrap()
-//                        .entry((host.clone(), interface.name.clone(), interface.mac.unwrap(), peer.host.clone(), peer.nic.clone(), peer.mac))
-//                        .and_modify(|p| { p.push(peer.vlan); p.sort(); p.dedup(); })
-//                        .or_insert(vec![peer.vlan]);
-//                }
-//            },
-//            Err(_) => println!("No packet at all"),
-//        }
-//    }
-//}
-
-//async fn show_topo() {
-//    loop {
-//        sleep(Duration::from_millis(1000)).await;
-//
-//        fn show_vlan(vlans: &Vec<u16>) -> String {
-//            if vlans.is_empty() {
-//                return String::new();
-//            }
-//            let mut start = vlans.get(0);
-//            let mut vlan_str = String::new();
-//            let mut range = false;
-//            let len = vlans.len();
-//
-//            for i in 0..len {
-//                let end = vlans.get(i);
-//                let next = vlans.get(i + 1);
-//                match next {
-//                    Some(&v) => {
-//                        if v != end.unwrap() + 1 {
-//                            range = true
-//                        }
-//                    },
-//                    None => range = true,
-//                }
-//                if range {
-//                    if !vlan_str.is_empty() {
-//                        vlan_str += ",";
-//                    }
-//                    if start == end {
-//                        vlan_str += &format!("{}", start.unwrap());
-//                    } else {
-//                        vlan_str += &format!("{}-{}", start.unwrap(), end.unwrap());
-//                    }
-//                    range = false;
-//                    start = next;
-//                }
-//            }
-//            vlan_str
-//        }
-//
-//        print!("\x1b[2J"); // clear screen with new line
-//        print!("\x1b[H");  // move cursor to left-top
-//        println!("    {:<24} {:^12} {:>24}", "local", "<-->", "Peer");
-//        let topo = TOPO.lock().unwrap();
-//        for (connect, vlan) in &*topo {
-//            println!("{} {} {} <--> {} {} {} - vlans: {}",
-//                     connect.0,  // host
-//                     connect.1,  // nic
-//                     connect.2,  // mac
-//                     connect.3,  // peer host
-//                     connect.4,  // peer nic
-//                     connect.5,  // peer mac
-//                     show_vlan(&vlan),
-//                     );
-//        }
-//    }
-//}
-
 async fn show_topo(
     mut rx: mpsc::UnboundedReceiver<(u32, Peer)>,
     host: String,
@@ -208,7 +55,6 @@ async fn show_topo(
         info!("TOPO: updating for {ifindex} connect {peer:?}");
         let interface: Vec<_> = nics.iter().filter(|n| n.index == ifindex).collect();
         if interface.len() == 0 {
-            //warn!("Topology not updated, ignore invalid nic {ifindex}");
             continue;
         }
         let me = Node {
@@ -229,28 +75,31 @@ async fn show_topo(
             .and_modify(|v| { v.push(peer.vlan); v.sort(); v.dedup(); })
             .or_insert(vec![peer.vlan]);
         info!("TOPO: updated for {ifindex}");
-        //if rx.len() == 0 {
-            //sleep(Duration::from_millis(300)).await;
-            //if rx.len() != 0 {
-            //    // read message from channel
-            //    continue;
-            //}
+        if rx.len() == 0 {
+            sleep(Duration::from_millis(300)).await;
+            if rx.len() != 0 {
+                // read message from channel
+                continue;
+            }
             print!("\x1b[2J"); // clear screen with new line
             print!("\x1b[H");  // move cursor to left-top
             println!("{:<24} {:^12} {:>24}", "local", "<-->", "Peer");
             println!("{topo}");
-        //}
+        }
     }
 }
 
 async fn recv_packet(
     packet: mpsc::UnboundedSender<(u32, Peer)>,
     topo: mpsc::UnboundedSender<(u32, Peer)>,
+    ifindex: u32,
 ) {
-    let fd = open_socket(libc::ETH_P_AARP as u16, true).unwrap();
+    let mut sock = Socket::new(libc::ETH_P_AARP as u16).unwrap();
+    sock.set_promiscuous(true, ifindex).unwrap();
+    sock.bind(ifindex).unwrap();
     loop {
         let mut buf: [u8; 1024] = [0; 1024];
-        let ifindex = recv(fd, &mut buf).await;
+        let ifindex = sock.recv(&mut buf).await.unwrap() as u32;
         if let Some((peer, request)) = packet::parse(&buf) {
             debug!("Receive {} at {} from {peer:?}", if request {"REQUEST"} else {"REPLY"}, ifindex);
             if request {
@@ -262,23 +111,25 @@ async fn recv_packet(
 }
 
 async fn send_packet(mut rx: mpsc::UnboundedReceiver<(u32, Peer)>, host: String, nics: Vec<Interface>) {
-    let fd = open_socket(libc::ETH_P_AARP as u16, true).unwrap();
+    let mut sock = Socket::new(libc::ETH_P_AARP as u16).unwrap();
     while let Some((ifindex, peer)) = rx.recv().await {
         let interface: Vec<_> = nics.iter().filter(|n| n.index == ifindex).collect();
         if interface.len() == 0 {
-            //warn!("Packet not sending. Ignore invalid interface ({ifindex})");
             continue;
         }
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; 256];
         let vlan = peer.vlan;
         let mac = peer.mac;
         packet::builder(&mut buf, &interface[0], mac, vlan, &host);
-        debug!("{}: Reply with VLAN {vlan} MAC({mac})", interface[0].name);
-        send(fd, &buf, ifindex).await;
+        debug!("{}: Send with VLAN {vlan} MAC({mac})", interface[0].name);
+        sock.set_promiscuous(true, ifindex).unwrap();
+        //sock.bind(ifindex).unwrap();
+        let _len = sock.send(&buf, ifindex).await;
     }
 }
 
 #[tokio::main]
+//#[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::init();
     let opt = Opt::parse();
@@ -290,10 +141,8 @@ async fn main() {
     // always sent untag packet
     vlans.push((0, 0));
 
-    //let name = uname();
     let name = hostname();
     info!("{name:?}");
-    //let hostname = name.nodename().to_str().unwrap().to_string();
 
     let nics = get_physical_nics();
 
@@ -315,8 +164,10 @@ async fn main() {
 
         let handler = tokio::spawn(show_topo(trx, name.clone(), nics.clone()));
         handlers.push(handler);
-        let handler = tokio::spawn(recv_packet(ptx.clone(), ttx));
-        handlers.push(handler);
+        for nic in &nics {
+            let handler = tokio::spawn(recv_packet(ptx.clone(), ttx.clone(), nic.index));
+            handlers.push(handler);
+        }
         let handler = tokio::spawn(send_packet(prx, name.clone(), nics.clone()));
         handlers.push(handler);
 
@@ -333,24 +184,6 @@ async fn main() {
             }
         }
     }
-
-    //for ifname in nics {
-    //    let interface = match datalink::interfaces().into_iter().find(|iface| iface.name == *ifname) {
-    //        None => {
-    //            println!("Interface {} is not present.", ifname);
-    //            continue;
-    //        },
-    //        Some(interface) => interface,
-    //    };
-    //    if !interface.is_up() || !interface.is_lower_up() {
-    //        println!("{ifname} is not up, skip!");
-    //        continue;
-    //    }
-    //    info!("nic: {interface:?}");
-
-    //    let handler = tokio::spawn(detect_connection(hostname.clone(), interface, vlans.clone()));
-    //    handlers.push(handler);
-    //}
 
     for handler in handlers {
         let _ = handler.await;

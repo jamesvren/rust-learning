@@ -6,10 +6,11 @@ use std::task::{Poll, Context};
 use std::pin::Pin;
 use std::mem;
 use std::io;
-use tokio;
+use tokio::io::unix::AsyncFd;
 use libc::{
     c_void,
     socket,
+    sendto,
     recvfrom,
     sockaddr,
     sockaddr_ll,
@@ -58,6 +59,45 @@ impl Future for SocketRead<'_> {
     }
 }
 
+struct AsyncSock {
+    inner: AsyncFd<i32>,
+}
+
+impl AsyncSock {
+    fn new(fd: i32) -> io::Result<Self> {
+        unsafe {
+            let flag = libc::fcntl(fd, libc::F_GETFL, 0);
+            libc::fcntl(fd, libc::F_SETFL, flag | libc::O_NONBLOCK);
+        }
+
+        Ok(Self {
+            inner: AsyncFd::new(fd)?
+        })
+    }
+
+    async fn read(&self, buf: &mut [u8]) -> io::Result<isize> {
+        loop {
+            let mut guard = self.inner.readable().await?;
+
+            match guard.try_io(|inner| recv(*inner.get_ref(), buf)) {
+                Ok(result) => return result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    async fn write(&self, buf: &mut [u8]) -> io::Result<isize> {
+        loop {
+            let mut guard = self.inner.writable().await?;
+
+            match guard.try_io(|inner| send(*inner.get_ref(), buf)) {
+                Ok(result) => return result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+}
+
 async fn async_recv(fd: i32, buf: &mut [u8]) -> isize {
     let sock = SocketRead {
         fd,
@@ -66,37 +106,72 @@ async fn async_recv(fd: i32, buf: &mut [u8]) -> isize {
     sock.await
 }
 
-async fn recv(fd: i32, buf: &mut [u8]) -> isize {
-//fn recv(fd: i32, buf: &mut [u8]) -> isize {
+//async fn recv(fd: i32, buf: &mut [u8]) -> isize {
+fn recv(fd: i32, buf: &mut [u8]) -> io::Result<isize> {
     let mut sender_addr: sockaddr_ll = unsafe { mem::zeroed() };
 
-    let len: isize;
     let mut addr_buf_sz: socklen_t = mem::size_of::<sockaddr_ll>() as socklen_t;
-    println!("recv from socket {fd}");
+    //println!("recv from socket {fd}");
     unsafe {
         let addr_ptr = mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sender_addr);
-        len = match recvfrom(fd,
-                             buf.as_mut_ptr() as *mut c_void,
-                             buf.len(),
-                             0,   // flags
-                             addr_ptr,
-                             &mut addr_buf_sz) {
+        match recvfrom(fd,
+                       buf.as_mut_ptr() as *mut c_void,
+                       buf.len(),
+                       0,   // flags
+                       addr_ptr,
+                       &mut addr_buf_sz) {
             -1 => {
                 let err = io::Error::last_os_error(); // io::ErrorKind::WouldBlock
-                eprintln!("failed: {}, kind: {:?}", err, err.kind());
-                0
+                //eprintln!("failed: {}, kind: {:?}", err, err.kind());
+                Err(err)
             },
             len => {
-                let iface_index = sender_addr.sll_ifindex;
+                let _iface_index = sender_addr.sll_ifindex;
                 //println!("len: {len} = {buf:?}, from nic: {iface_index}");
-                println!("len: {len}, from nic: {iface_index}");
-                len
+                //println!("socket({fd}) len: {len}, from nic: {iface_index}");
+                Ok(len)
             }
         }
 
     }
-    println!("fd({fd}): recv {len} bytes");
-    len
+}
+
+fn send(fd: i32, buf: &mut [u8]) -> io::Result<isize> {
+    let proto = libc::ETH_P_ALL as u16;
+    let mut sa = sockaddr_ll {
+        sll_family: AF_PACKET as u16,
+        sll_protocol: proto.to_be(),
+        sll_ifindex: 0,
+        sll_hatype: 0,
+        sll_pkttype: 0,
+        sll_halen: 0,
+        sll_addr: [0; 8]
+    };
+
+    let addr_buf_sz: socklen_t = mem::size_of_val(&sa) as socklen_t;
+    //println!("recv from socket {fd}");
+    unsafe {
+        let addr_ptr = mem::transmute::<*mut sockaddr_ll, *mut sockaddr>(&mut sa);
+        match sendto(fd,
+                     buf.as_ptr() as *const c_void,
+                     buf.len(),
+                     0,   // flags
+                     addr_ptr,
+                     addr_buf_sz) {
+            -1 => {
+                let err = io::Error::last_os_error(); // io::ErrorKind::WouldBlock
+                //eprintln!("failed: {}, kind: {:?}", err, err.kind());
+                Err(err)
+            },
+            len => {
+                let _iface_index = sa.sll_ifindex;
+                //println!("len: {len} = {buf:?}, from nic: {iface_index}");
+                //println!("socket({fd}) len: {len}, from nic: {iface_index}");
+                Ok(len)
+            }
+        }
+
+    }
 }
 
 fn open_sock(proto: u16) -> io::Result<i32> {
@@ -105,15 +180,15 @@ fn open_sock(proto: u16) -> io::Result<i32> {
         fd => {
             unsafe {
                 let flag = libc::fcntl(fd, libc::F_GETFL, 0);
-                //libc::fcntl(fd, libc::F_SETFL, flag | libc::O_NONBLOCK);
+                libc::fcntl(fd, libc::F_SETFL, flag | libc::O_NONBLOCK);
                 Ok(fd)
             }
         }
     }
 }
 
-//#[tokio::main(flavor = "current_thread")]
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
+//#[tokio::main]
 async fn main() {
     //let a1 = async {
     //    let fd = open_sock(libc::ETH_P_ALL as u16).unwrap();
@@ -146,37 +221,46 @@ async fn main() {
 
     let mut handlers: Vec<tokio::task::JoinHandle<isize>> = vec![];
 
-    //handlers.push(tokio::spawn(async {
-    //    let fd = open_sock(libc::ETH_P_ALL as u16).unwrap();
-    //    loop {
-    //        let mut buf: [u8; 1024] = [0; 1024];
-
-    //        recv(fd, &mut buf).await;
-    //        //async_recv(fd, &mut buf).await
-    //    }
-    //}));
-
-    //handlers.push(tokio::spawn(async {
-    //    let fd = open_sock(libc::ETH_P_AARP as u16).unwrap();
-    //    loop {
-    //        let mut buf: [u8; 1024] = [0; 1024];
-
-    //        recv(fd, &mut buf).await;
-    //        //async_recv(fd, &mut buf).await
-    //    }
-    //}));
-
     handlers.push(tokio::spawn(async {
-        let fd = open_sock(libc::ETH_P_ARP as u16).unwrap();
+        let fd = open_sock(libc::ETH_P_ALL as u16).unwrap();
+        let sock = AsyncSock::new(fd).unwrap();
         loop {
             let mut buf: [u8; 1024] = [0; 1024];
 
-            recv(fd, &mut buf).await;
+            let len = sock.read(&mut buf).await;
+            //recv(fd, &mut buf).await;
             //async_recv(fd, &mut buf).await
+            println!("ALL: recv {len:?} from {fd}");
+        }
+    }));
+
+    handlers.push(tokio::spawn(async {
+        let fd = open_sock(libc::ETH_P_AARP as u16).unwrap();
+        let sock = AsyncSock::new(fd).unwrap();
+        loop {
+            let mut buf: [u8; 1024] = [0; 1024];
+
+            let len = sock.read(&mut buf).await;
+            //recv(fd, &mut buf).await;
+            //async_recv(fd, &mut buf).await
+            println!("AARP: recv {len:?} from {fd}");
+        }
+    }));
+
+    handlers.push(tokio::spawn(async {
+        let fd = open_sock(libc::ETH_P_ARP as u16).unwrap();
+        let sock = AsyncSock::new(fd).unwrap();
+        loop {
+            let mut buf: [u8; 1024] = [0; 1024];
+
+            let len = sock.read(&mut buf).await;
+            //recv(fd, &mut buf).await;
+            //async_recv(fd, &mut buf).await
+            println!("ARP: recv {len:?} from {fd}");
         }
     }));
 
     for handler in handlers {
-        handler.await;
+        let _ = handler.await;
     }
 }

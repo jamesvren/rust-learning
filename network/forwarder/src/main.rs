@@ -10,6 +10,7 @@ use std::path::Path;
 use std::process::Output;
 use std::process::Stdio;
 use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
@@ -33,12 +34,13 @@ struct Response {
 }
 
 async fn handle_stream(
-    mut stream: impl AsyncReadExt + AsyncWriteExt + std::marker::Unpin,
+    mut stream: impl AsyncReadExt + AsyncWriteExt + std::marker::Unpin + AsRawFd,
 ) -> Result<()> {
     let mut data = BytesMut::with_capacity(4096);
     let n = stream.read_buf(&mut data).await?;
     let uuid = Uuid::new_v4();
-    info!("[{uuid}] - Got Request({n} bytes): {data:?}");
+    let sock = stream.as_raw_fd();
+    info!("[{uuid}][{sock}] - Got Request({n} bytes): {data:?}");
 
     let mut response = Response {
         ..Default::default()
@@ -56,15 +58,16 @@ async fn handle_stream(
     }
     info!("[{uuid}] - Got {response:?}");
     let response = serde_json::to_vec(&response)?;
+    let sock = stream.as_raw_fd();
     match stream.write_all(&response).await {
         Ok(_) => {
             info!(
-                "[{uuid}] - Send response({} bytes) successfully.",
+                "[{uuid}][{sock}] - Send response({} bytes) successfully.",
                 response.len()
             )
         }
         Err(e) => {
-            error!("[{uuid}] - Failed to send response: {e}");
+            error!("[{uuid}][{sock}] - Failed to send response: {e}");
         }
     }
     stream.shutdown().await?;
