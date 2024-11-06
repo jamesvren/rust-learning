@@ -23,6 +23,7 @@ use forwarder::log as logging;
 #[derive(Deserialize)]
 struct Request {
     bash: String,
+    input: Option<String>,
     owner: String,
 }
 
@@ -36,8 +37,14 @@ struct Response {
 async fn handle_stream(
     mut stream: impl AsyncReadExt + AsyncWriteExt + std::marker::Unpin + AsRawFd,
 ) -> Result<()> {
-    let mut data = BytesMut::with_capacity(4096);
-    let n = stream.read_buf(&mut data).await?;
+    const BUF_LEN: usize = 4096;
+    let mut data = BytesMut::with_capacity(BUF_LEN);
+    let mut n = stream.read_buf(&mut data).await?;
+    while n % BUF_LEN == 0 {
+        data.reserve(BUF_LEN);
+        n = stream.read_buf(&mut data).await?;
+    }
+    n = data.len();
     let uuid = Uuid::new_v4();
     let sock = stream.as_raw_fd();
     info!("[{uuid}][{sock}] - Got Request({n} bytes): {data:?}");
@@ -46,7 +53,7 @@ async fn handle_stream(
         ..Default::default()
     };
     let request: Request = serde_json::from_slice::<Request>(&data)?;
-    match run_cmd(&request.bash).await {
+    match run_cmd(&request.bash, request.input.as_deref()).await {
         Ok(output) => {
             response.output = String::from_utf8_lossy(output.stdout.as_slice()).to_string();
             response.error = String::from_utf8_lossy(output.stderr.as_slice()).to_string();
@@ -74,16 +81,28 @@ async fn handle_stream(
     Ok(())
 }
 
-async fn run_cmd(cmd: &str) -> Result<Output> {
+async fn run_cmd(cmd: &str, input: Option<&str>) -> Result<Output> {
     info!("Run command: {cmd}");
-    Command::new("bash")
+    let mut command = Command::new("bash");
+    let command = command
         .arg("-c")
         .arg(cmd)
-        .stdout(Stdio::piped())
         .stdin(Stdio::piped())
-        .output()
-        .await
-        .map_err(anyhow::Error::from)
+        .stdout(Stdio::piped());
+    match input {
+        None => command.output().await.map_err(anyhow::Error::from),
+        Some(input) => {
+            info!("Command Input: {input}");
+            let mut child = command.spawn().map_err(anyhow::Error::from)?;
+            match child.stdin {
+                Some(ref mut stdin) => {
+                    stdin.write_all(input.as_bytes()).await?;
+                    child.wait_with_output().await.map_err(anyhow::Error::from)
+                }
+                None => Err(anyhow::anyhow!("STDIN not catched!!!")),
+            }
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -178,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_cmd() {
-        let output = run_cmd("echo test").await.unwrap();
+        let output = run_cmd("echo test", None).await.unwrap();
         assert!(output.status.success());
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stderr.len(), 0);
@@ -191,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_cmd_pipe() {
-        let output = run_cmd("echo test | grep test").await.unwrap();
+        let output = run_cmd("echo test | grep test", None).await.unwrap();
         assert!(output.status.success());
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stderr.len(), 0);
@@ -204,13 +223,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_cmd_glob() {
-        let output = run_cmd("find . -name Car*").await.unwrap();
+        let output = run_cmd("find . -name Car*", None).await.unwrap();
         assert_eq!(output.status.success(), false);
         println!("stderr: {}", unsafe {
             std::str::from_utf8_unchecked(&output.stderr)
         });
 
-        let output = run_cmd("find . -name \"Car*\"").await.unwrap();
+        let output = run_cmd("find . -name \"Car*\"", None).await.unwrap();
         assert!(output.status.success());
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stderr.len(), 0);
@@ -223,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_cmd_bash() {
-        let output = run_cmd("bash -c 'echo test'").await.unwrap();
+        let output = run_cmd("bash -c 'echo test'", None).await.unwrap();
         assert!(output.status.success());
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stderr.len(), 0);
@@ -236,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_cmd_exec1() {
-        let output = run_cmd("echo `echo test`").await.unwrap();
+        let output = run_cmd("echo `echo test`", None).await.unwrap();
         assert!(output.status.success());
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stderr.len(), 0);
@@ -249,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_cmd_exec2() {
-        let output = run_cmd("echo $(echo test)").await.unwrap();
+        let output = run_cmd("echo $(echo test)", None).await.unwrap();
         assert!(output.status.success());
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stderr.len(), 0);
@@ -262,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_cmd_awk() {
-        let output = run_cmd("echo hello world | awk '{print $1}'")
+        let output = run_cmd("echo hello world | awk '{print $1}'", None)
             .await
             .unwrap();
         assert!(output.status.success());
@@ -272,6 +291,21 @@ mod tests {
         assert_eq!(
             unsafe { std::str::from_utf8_unchecked(&output.stdout) },
             "hello\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_cmd_stdin() {
+        let output = run_cmd("cat", Some("ok"))
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stderr.len(), 0);
+        assert_ne!(output.stdout.len(), 0);
+        assert_eq!(
+            unsafe { std::str::from_utf8_unchecked(&output.stdout) },
+            "ok"
         );
     }
 }
