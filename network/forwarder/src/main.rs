@@ -3,7 +3,7 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use clap::Parser;
-use log::{error, info, LevelFilter};
+use log::{error, info, debug, LevelFilter};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -36,16 +36,19 @@ struct Response {
 
 async fn handle_stream(
     mut stream: impl AsyncReadExt + AsyncWriteExt + std::marker::Unpin + AsRawFd,
+    uuid: Uuid,
 ) -> Result<()> {
     const BUF_LEN: usize = 4096;
     let mut data = BytesMut::with_capacity(BUF_LEN);
     let mut n = stream.read_buf(&mut data).await?;
     while n % BUF_LEN == 0 {
+        if n == 0 {
+            break;
+        }
         data.reserve(BUF_LEN);
         n = stream.read_buf(&mut data).await?;
     }
     n = data.len();
-    let uuid = Uuid::new_v4();
     let sock = stream.as_raw_fd();
     info!("[{uuid}][{sock}] - Got Request({n} bytes): {data:?}");
 
@@ -92,7 +95,7 @@ async fn run_cmd(cmd: &str, input: Option<&str>) -> Result<Output> {
     match input {
         None => command.output().await.map_err(anyhow::Error::from),
         Some(input) => {
-            info!("Command Input: {input}");
+            debug!("Command Input: {input}");
             let mut child = command.spawn().map_err(anyhow::Error::from)?;
             match child.stdin {
                 Some(ref mut stdin) => {
@@ -155,10 +158,11 @@ async fn main() -> Result<()> {
     handlers.push(tokio::spawn(async move {
         loop {
             let (stream, addr) = unix_listener.accept().await?;
-            info!("Got Request from {addr:?}");
+            let uuid = Uuid::new_v4();
+            info!("[{uuid}] Accept connection from {addr:?}");
             tokio::spawn(async move {
-                match handle_stream(stream).await {
-                    Err(e) => error!("{e}"),
+                match handle_stream(stream, uuid).await {
+                    Err(e) => error!("[{uuid}] {e}"),
                     _ => (),
                 }
             });
@@ -173,10 +177,11 @@ async fn main() -> Result<()> {
         handlers.push(tokio::spawn(async move {
             loop {
                 let (stream, addr) = tcp_listener.accept().await?;
-                info!("Got Request from {addr:?}");
+                let uuid = Uuid::new_v4();
+                info!("[{uuid}] Accept connection from {addr:?}");
                 tokio::spawn(async move {
-                    match handle_stream(stream).await {
-                        Err(e) => error!("{e}"),
+                    match handle_stream(stream, uuid).await {
+                        Err(e) => error!("[{uuid}] {e}"),
                         _ => (),
                     }
                 });
