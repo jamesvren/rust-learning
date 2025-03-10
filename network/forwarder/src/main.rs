@@ -3,7 +3,7 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use clap::Parser;
-use log::{error, info, debug, LevelFilter};
+use log::{error, info, warn, debug, LevelFilter};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use forwarder::log as logging;
@@ -40,13 +41,26 @@ async fn handle_stream(
 ) -> Result<()> {
     const BUF_LEN: usize = 4096;
     let mut data = BytesMut::with_capacity(BUF_LEN);
-    let mut n = stream.read_buf(&mut data).await?;
-    while n % BUF_LEN == 0 {
-        if n == 0 {
-            break;
+    let mut n = 0;
+    // Timeout read in case of data length equal to buffer length
+    // It will hang in such case since we don't know how many bytes we need to read.
+    loop {
+        match timeout(Duration::from_secs(5), stream.read_buf(&mut data)).await {
+            Ok(Ok(n)) if n == 0 => break,  // Connection closed
+            Ok(Ok(n)) if n % BUF_LEN != 0 => break,  // All data read
+            Ok(Ok(n)) => {
+                // Extend buffer to read more
+                data.reserve(BUF_LEN);
+            }
+            Ok(Err(e)) => {
+                error!("[{uuid}] - {e}");
+                break;
+            },
+            Err(e) => {
+                warn!("[{uuid} - Read timeout: {e}]");
+                break;
+            },
         }
-        data.reserve(BUF_LEN);
-        n = stream.read_buf(&mut data).await?;
     }
     n = data.len();
     let sock = stream.as_raw_fd();
