@@ -1,0 +1,13 @@
+[package]
+name = "portmirror"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.38", features = ["derive"] }
+libbpf-rs = "0.24.8"
+libc = "0.2.172"
+plain = "0.2.3"
+
+[build-dependencies]
+libbpf-cargo = "0.24.8"
