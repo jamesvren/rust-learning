@@ -25,11 +25,11 @@ const volatile __u8 hash_type = 0;
 struct flow_key {
     union {
         __u32 saddr;
-        __u32 saddr6[4];
+        __u8 saddr6[16];
     };
     union {
         __u32 daddr;
-        __u32 daddr6[4];
+        __u8 daddr6[16];
     };
     __u16 sport;
     __u16 dport;
@@ -55,44 +55,20 @@ struct {
 #define log_err(__ret, __msg) bpf_printk("ERROR line:%d ret:%d error: %s\n", __LINE__, __ret, __msg)
 
 
-//static __always_inline int parse_ipv6(struct __sk_buff *skb, struct flow_key *key) {
-//    void *data_end = (void *)(long)skb->data_end;
-//    struct ipv6hdr *ip6h = (struct ipv6hdr *)(skb->data + sizeof(struct ethhdr));
-//    if ((void *)(ip6h + 1) > data_end)
-//        return TC_ACT_OK;
-//
-//    __builtin_memcpy(key->saddr6, ip6h->saddr.s6_addr, 16);
-//    __builtin_memcpy(key->daddr6, ip6h->daddr.s6_addr, 16);
-//    key->ip_version = 6;
-//
-//    if (ip6h->nexthdr == IPPROTO_TCP || ip6h->nexthdr == IPPROTO_UDP) {
-//        struct tcphdr *tcp = (struct tcphdr *)(ip6h + 1);
-//        if ((void *)(tcp + 1) > data_end)
-//            return TC_ACT_OK;
-//
-//        key->sport = bpf_ntohs(tcp->source);
-//        key->dport = bpf_ntohs(tcp->dest);
-//        key->proto = ip6h->nexthdr;
-//    }
-//    return 0;
-//}
-
 SEC("tc")
 int port_mirror(struct __sk_buff *skb)
 {
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
 
-    bpf_printk("HASH TYPE: %u", hash_type);
     if (hash_type == HASH_TYPE_NONE) {
         // No filter applied, just clone all
         __u32 tap = skb->ifindex;
         __u32 *mirror_ifindex = bpf_map_lookup_elem(&mirror_map, &tap);
         if (mirror_ifindex)
             bpf_clone_redirect(skb, *mirror_ifindex, 0);
-
     } else {
-        // Clone base on filter, apply only on IP packet
+        // Clone base on filter, only support IP packet
         struct ethhdr *eth = data;
         if ((void *)(eth + 1) > data_end)
             return TC_ACT_OK;
@@ -130,6 +106,7 @@ int port_mirror(struct __sk_buff *skb)
             return TC_ACT_OK;
         }
 
+        bpf_printk("HASH TYPE: %u", hash_type);
         if (proto == IPPROTO_TCP) {
             struct tcphdr *tcph = trans_data;
 
@@ -148,26 +125,37 @@ int port_mirror(struct __sk_buff *skb)
             dport = udph->dest;
         }
 
-        bpf_printk("IP: saddr=%u, daddr=%u, proto=%u",
-            bpf_ntohl(sip), bpf_ntohl(dip), proto);
+        bpf_printk("IP: saddr=%u, daddr=%u, proto=%u", sip, dip, proto);
+        // TODO: Supported since 5.13
+        //bpf_printk("IP6: saddr=%pi6", &sip6);
+        bpf_printk("IP6: saddr=%x %x", sip6.in6_u.u6_addr8[0], sip6.in6_u.u6_addr8[1]);
+        bpf_printk("IP6: saddr=%x %x", sip6.in6_u.u6_addr8[2], sip6.in6_u.u6_addr8[3]);
+        bpf_printk("IP6: saddr=%x %x", sip6.in6_u.u6_addr8[4], sip6.in6_u.u6_addr8[5]);
+        bpf_printk("IP6: saddr=%x %x", sip6.in6_u.u6_addr8[6], sip6.in6_u.u6_addr8[7]);
+        bpf_printk("IP6: saddr=%x %x", sip6.in6_u.u6_addr8[8], sip6.in6_u.u6_addr8[9]);
+        bpf_printk("IP6: saddr=%x %x", sip6.in6_u.u6_addr8[10], sip6.in6_u.u6_addr8[11]);
+        bpf_printk("IP6: saddr=%x %x", sip6.in6_u.u6_addr8[12], sip6.in6_u.u6_addr8[13]);
+        bpf_printk("IP6: saddr=%x %x", sip6.in6_u.u6_addr8[14], sip6.in6_u.u6_addr8[15]);
         bpf_printk("IP: sport=%u, dport=%u",
             bpf_ntohs(sport), bpf_ntohs(dport));
         struct flow_key pkt_key = {
             .ip_version = ip_version
         };
 
-        if (hash_type & HASH_TYPE_SRC)
+        if (hash_type & HASH_TYPE_SRC) {
             if (ip_version == 4) {
                 pkt_key.saddr = sip;
             } else {
                 __builtin_memcpy(pkt_key.saddr6, sip6.in6_u.u6_addr8, 16);
             }
-        if (hash_type & HASH_TYPE_DST)
+        }
+        if (hash_type & HASH_TYPE_DST) {
             if (ip_version == 4) {
                 pkt_key.daddr = dip;
             } else {
                 __builtin_memcpy(pkt_key.daddr6, sip6.in6_u.u6_addr8, 16);
             }
+        }
         if (hash_type & HASH_TYPE_PROTO)
             pkt_key.proto = proto;
         if (hash_type & HASH_TYPE_SPORT)
@@ -178,8 +166,18 @@ int port_mirror(struct __sk_buff *skb)
         bpf_printk("SPORT flag = %u", hash_type & HASH_TYPE_SPORT);
         bpf_printk("KEY: saddr=%lu, daddr=%lu, proto=%u",
             pkt_key.saddr, pkt_key.daddr, pkt_key.proto);
+
+        bpf_printk("KEY6: sip6");
+        for (int i = 0; i< 16; i += 2) {
+            bpf_printk("%x %x", pkt_key.saddr6[i], pkt_key.saddr6[i+1]);
+        }
+        bpf_printk("KEY6: dip6");
+        for (int i = 0; i< 16; i += 2) {
+            bpf_printk("%x %x", pkt_key.daddr6[i], pkt_key.daddr6[i+1]);
+        }
         bpf_printk("KEY: sport=%u, dport=%u",
             pkt_key.sport, pkt_key.dport);
+
         __u8 *action = bpf_map_lookup_elem(&filter_map, &pkt_key);
         if (action && *action == MIRROR) {
             __u32 tap = skb->ifindex;

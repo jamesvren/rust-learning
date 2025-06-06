@@ -1,6 +1,7 @@
 use std::mem::MaybeUninit;
 use std::os::unix::io::AsFd as _;
 use std::ops::DerefMut;
+use std::net::IpAddr;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
@@ -48,8 +49,8 @@ struct Opts {
     #[arg(short, long)]
     detach: bool,
 
-    saddr: Option<u32>,
-    daddr: Option<u32>,
+    saddr: Option<IpAddr>,
+    daddr: Option<IpAddr>,
     sport: Option<u16>,
     dport: Option<u16>,
     proto: Option<u8>,
@@ -64,8 +65,8 @@ struct Opts {
 
 #[repr(C, packed)]
 struct FlowKey {
-    saddr: [u32; 4],
-    daddr: [u32; 4],
+    saddr: u128,
+    daddr: u128,
     sport: u16,
     dport: u16,
     proto: u8,
@@ -79,10 +80,6 @@ const HASH_TYPE_SPORT: u8 = 0x08;
 const HASH_TYPE_DPORT: u8 = 0x10;
 
 fn bump_memlock_rlimit() -> Result<(), Box<dyn std::error::Error>> {
-    //let rlimit = libc::rlimit {
-    //    rlim_cur: 128 << 20,
-    //    rlim_max: 128 << 20,
-    //};
     let rlimit = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,
@@ -93,6 +90,13 @@ fn bump_memlock_rlimit() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn ip_to_bytes(ip: IpAddr) -> u128 {
+    match ip {
+        IpAddr::V4(ip4) => ip4.to_bits().to_be().into(),
+        IpAddr::V6(ip6) => ip6.to_bits().to_be(),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -110,11 +114,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .deref_mut();
         //.expect("`rodata` is not memory mapped");
 
-    let saddr = opt.saddr.unwrap_or(0).to_be();
-    let daddr = opt.daddr.unwrap_or(0).to_be();
+    let sip = opt.saddr.unwrap_or(IpAddr::from([0; 4]));
+    let dip = opt.daddr.unwrap_or(IpAddr::from([0; 4]));
+    let version = if sip.is_ipv4() { 4 } else { 6 };
+    let saddr = ip_to_bytes(sip);
+    let daddr = ip_to_bytes(dip);
     let sport = opt.sport.unwrap_or(0).to_be();
     let dport = opt.dport.unwrap_or(0).to_be();
     let proto = opt.proto.unwrap_or(0).to_be();
+    println!("got sip: {:#?}", saddr);
+    println!("got dip: {:#?}", daddr);
 
     if saddr != 0 { rodata.hash_type |= HASH_TYPE_SRC }
     if daddr != 0 { rodata.hash_type |= HASH_TYPE_DST }
@@ -127,12 +136,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mirror_ifindex = opt.mirror;
 
     let key = FlowKey {
-        saddr: [saddr, 0, 0, 0],
-        daddr: [daddr, 0, 0, 0],
+        saddr,
+        daddr,
         sport,
         dport,
         proto,
-        ip_version: 4,
+        ip_version: version,
     };
 
     let flow_key = unsafe { plain::as_bytes(&key) };
